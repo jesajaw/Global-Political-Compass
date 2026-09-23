@@ -1,0 +1,28 @@
+{
+  "evaluations": {
+    "23092026-63.1": {
+      "country_id": 63,
+      "year": 2024,
+      "date_assessed": "2026-09-23",
+      "summary": "Neuausrichtung der Wirtschaftspolitik und Anpassung im Datenschutz.",
+      "justification": {
+        "left_right": "Erhöhte staatliche Subventionen im Energiesektor (-25).",
+        "lib_auth": "Starke Bürgerrechte bei gleichzeitiger Verschärfung digitaler Sicherheitsgesetze (-40)."
+      },
+      "sources": [
+        "https://beispiel-quelle.org/bericht-2024"
+      ]
+    },
+    "23092026-63.2": {
+      "country_id": 63,
+      "year": 2025,
+      "date_assessed": "2026-09-23",
+      "summary": "Leichte Deregulierung im Finanzsektor.",
+      "justification": {
+        "left_right": "Deregulierungsmassnahmen im Markt (-20).",
+        "lib_auth": "Anpassung der Versammlungsrechte (-35)."
+      },
+      "sources": []
+    }
+  }
+}
