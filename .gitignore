@@ -18,3 +18,10 @@ ENV/
 # OS
 .DS_Store
 Thumbs.db
+
+*.gguf
+*.bin
+*.safetensors
+models/
+.venv/
+__pycache__/
