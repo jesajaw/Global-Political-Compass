@@ -17,7 +17,7 @@ from pathlib import Path
 import dearpygui.dearpygui as dpg
 
 import theme
-import compass_view
+import ui.mainwindow.compass_view as compass_view
 from demo_data import DEFAULT_COUNTRIES, DEFAULT_SCORES, DEFAULT_EVALUATIONS
 
 WINDOW_TITLE = "Global Political Compass Engine"
