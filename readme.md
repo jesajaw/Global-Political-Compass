@@ -13,8 +13,24 @@ As remarked -- it is not possible to work totally objective and I do not want to
 
 ---
 
-## 📌 Projektübersicht
+## 📌 Overview
 
-Dieses Werkzeug analysiert politische und wirtschaftliche Systeme von Staaten mithilfe von Large Language Models (OpenAI GPT-4o) und speichert strukturierte Profil-Daten im JSON-Format.
+This tool (is intended to eventually) analyze the political and economic systems of countries using large language models (OpenAI GPT-4o) and store structured profile data in JSON format.
 
 ---
+
+## Project structure
+
+The app is written in tkinter (standard library only) and has three areas:
+
+| Area | Folder | What it does |
+|------|--------|--------------|
+| **UI**    | `ui/`    | The windows: the compass (`compass_window/`) and the data window (`data_window/`), styled like mtools (`style.py`, `dialogs.py`, `widgets.py`). |
+| **AGENT** | `agent/` | Asks a local LLM via Ollama to rate a country for a year (`python -m agent.setup_model` installs the model). |
+| **DATA**  | `data/`  | `countries.json` (the country list), one JSON file per country in `data/countries/` (created when its first entry is added), and `scoring.py` for evaluation. |
+
+**How scores work:** every country can hold any number of entries per year (added by hand or by the agent).
+`data.scoring.get_score(country_id, year)` returns the average of all entries of that year -- that average is what the compass plots.
+There is no demo data: an empty compass simply means nothing has been entered yet.
+
+Run with `python main.py` (compass) or `python data_editor.py` (data window only).

@@ -43,9 +43,49 @@ _SCHEMES = {
 # switch palette here -- same switch as mtools/style.py
 COLOR_SCHEME = "dark_purple"
 
-# how much bigger than the original draft everything (fonts, padding,
-# controls) should be -- 1.0 would be the original, cramped sizing
-UI_SCALE = 1.45
+def enable_dpi_awareness() -> None:
+    # Per-monitor DPI awareness: Windows stops bitmap-stretching the window
+    # (that stretching was the blurry look), so we render at native pixels
+    # and must do the scaling ourselves -- see _detect_os_scale().
+    # Idempotent; must run before any window exists.
+    if sys.platform != "win32":
+        return
+    import ctypes
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)
+    except Exception:
+        try:
+            ctypes.windll.user32.SetProcessDPIAware()
+        except Exception:
+            pass
+
+
+def _detect_os_scale() -> float:
+    """Real Windows display scale (1.0 = 100%, 1.5 = 150% ...)."""
+    if sys.platform != "win32":
+        return 1.0
+    import ctypes
+    try:
+        return ctypes.windll.user32.GetDpiForSystem() / 96.0
+    except Exception:
+        try:
+            dc = ctypes.windll.user32.GetDC(0)
+            dpi = ctypes.windll.gdi32.GetDeviceCaps(dc, 88)  # LOGPIXELSX
+            ctypes.windll.user32.ReleaseDC(0, dc)
+            return dpi / 96.0
+        except Exception:
+            return 1.0
+
+
+enable_dpi_awareness()
+
+# The UI used to be scaled by a hardcoded 1.45 while DPI awareness switched
+# Windows' own scaling off -> sizes only looked right on a ~145% screen.
+# Now the factor follows the real display scale. USER_SCALE is the personal
+# "make everything a bit bigger/smaller" knob (1.0 = same size as other apps).
+USER_SCALE = 1.0
+OS_SCALE = _detect_os_scale()
+UI_SCALE = OS_SCALE * USER_SCALE if sys.platform == "win32" else 1.45
 
 # Segoe UI on Windows if it's there, DPG's built-in font everywhere else --
 # no "system" fallback scheme needed like in style.py since DPG always has
@@ -86,7 +126,6 @@ class Layout:
     # below the plot instead of above it -- same idea as the old
     # header_height, just reserved at the bottom of the window now
     control_bar_height: int = round(46 * UI_SCALE)
-    canvas_min: int = round(400 * UI_SCALE)
     # the same WindowPadding pushed onto every dpg widget in apply_theme()
     # below -- exposed here too so window.py can size the canvas "cell"
     # (the child_window around the drawlist) without duplicating the number
@@ -101,10 +140,11 @@ class Layout:
     search_width: int = round(220 * UI_SCALE)
     combo_width: int = round(100 * UI_SCALE)
     # the corner "open data editor" button became a normal bottom-bar
-    # button (no longer floating over the canvas corner), so it gets a
-    # plain readable width/height like the other controls now
+    # button (no longer floating over the canvas corner) -- only its width
+    # is set explicitly; height is left to the same automatic FramePadding
+    # sizing as the search box and year combo next to it, so all three
+    # controls line up at the same height
     data_button_w: int = round(70 * UI_SCALE)
-    data_button_h: int = round(30 * UI_SCALE)
 
     # -- canvas text sizes ------------------------------------------------
     # dpg.draw_text() defaults to a tiny fixed size (~10px) that ignores
@@ -205,12 +245,19 @@ def load_font() -> None:
     size. Falls back to scaling DPG's built-in font wherever that file
     doesn't exist (i.e. anywhere that isn't Windows) -- same intent as
     style.py's segoe/system switch, just resolved automatically.
+
+    (An earlier version of this also baked one extra real font per canvas
+    text size, for crisper draw_text() rendering. Reverted -- draw_text()
+    doesn't reliably take a font override across DPG versions the way that
+    assumed, and it blanked the whole canvas rather than just looking a
+    bit soft. Single baked font + size= is the same tradeoff the rest of
+    DPG's ecosystem makes.)
     """
     for path in _FONT_FILE_CANDIDATES:
         try:
             with dpg.font_registry():
                 with dpg.font(path, _FONT_SIZE_NORMAL) as font:
-                    dpg.add_font_range_hint(dpg.mvFontRangeHint_Default)
+                    pass
             dpg.bind_font(font)
             return
         except Exception:
@@ -218,20 +265,6 @@ def load_font() -> None:
     # no matching font file found -- scale DPG's default font instead so the
     # "bigger, more readable" request still holds on non-Windows machines
     dpg.set_global_font_scale(_FALLBACK_FONT_SCALE)
-
-
-def enable_dpi_awareness() -> None:
-    # Same Windows-only DPI fix as mtools/style.py, no-op everywhere else.
-    if sys.platform != "win32":
-        return
-    import ctypes
-    try:
-        ctypes.windll.shcore.SetProcessDpiAwareness(2)  # Process_Per_Monitor_DPI_Aware
-    except Exception:
-        try:
-            ctypes.windll.user32.SetProcessDPIAware()
-        except Exception:
-            pass
 
 
 def enable_dark_titlebar(window_title: str) -> None:
@@ -249,5 +282,65 @@ def enable_dark_titlebar(window_title: str) -> None:
             return
         value = ctypes.c_int(1)
         ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, 20, ctypes.byref(value), ctypes.sizeof(value))
+    except Exception:
+        pass
+
+
+def set_app_user_model_id(app_id: str = "GlobalPoliticalCompass.App.1") -> None:
+    """
+    THE fix for the taskbar still showing python.exe's icon: without an
+    explicit AppUserModelID Windows groups the window under python.exe and
+    takes the taskbar icon from that exe, ignoring the window's own icon.
+    Must be called at the very start of main(), before the viewport exists.
+    """
+    if sys.platform != "win32":
+        return
+    import ctypes
+    try:
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(app_id)
+    except Exception:
+        pass
+
+
+def enable_taskbar_icon(window_title: str, icon_path: str | None) -> None:
+    """
+    Belt and braces on top of set_app_user_model_id(): load the .ico at the
+    exact big/small system sizes and push it onto the window (WM_SETICON)
+    and its class. Call once, after dpg.show_viewport().
+    """
+    if sys.platform != "win32" or not icon_path:
+        return
+    import ctypes
+    from ctypes import wintypes
+    try:
+        user32 = ctypes.windll.user32
+        user32.FindWindowW.restype = wintypes.HWND
+        hwnd = user32.FindWindowW(None, window_title)
+        if not hwnd:
+            return
+        IMAGE_ICON, LR_LOADFROMFILE = 1, 0x10
+        WM_SETICON, ICON_SMALL, ICON_BIG = 0x0080, 0, 1
+        GCLP_HICON, GCLP_HICONSM = -14, -34
+        SM_CXICON, SM_CYICON, SM_CXSMICON, SM_CYSMICON = 11, 12, 49, 50
+
+        user32.LoadImageW.restype = wintypes.HANDLE
+        user32.LoadImageW.argtypes = [wintypes.HINSTANCE, wintypes.LPCWSTR, wintypes.UINT,
+                                      ctypes.c_int, ctypes.c_int, wintypes.UINT]
+        user32.SendMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+        set_class = getattr(user32, "SetClassLongPtrW", None) or user32.SetClassLongW
+        set_class.argtypes = [wintypes.HWND, ctypes.c_int, wintypes.HANDLE]
+
+        h_big = user32.LoadImageW(None, icon_path, IMAGE_ICON,
+                                  user32.GetSystemMetrics(SM_CXICON), user32.GetSystemMetrics(SM_CYICON),
+                                  LR_LOADFROMFILE)
+        h_small = user32.LoadImageW(None, icon_path, IMAGE_ICON,
+                                    user32.GetSystemMetrics(SM_CXSMICON), user32.GetSystemMetrics(SM_CYSMICON),
+                                    LR_LOADFROMFILE)
+        if h_big:
+            user32.SendMessageW(hwnd, WM_SETICON, ICON_BIG, h_big)
+            set_class(hwnd, GCLP_HICON, h_big)
+        if h_small:
+            user32.SendMessageW(hwnd, WM_SETICON, ICON_SMALL, h_small)
+            set_class(hwnd, GCLP_HICONSM, h_small)
     except Exception:
         pass

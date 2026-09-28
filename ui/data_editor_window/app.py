@@ -50,6 +50,7 @@ def main() -> None:
     dpg.show_viewport()
 
     theme.enable_dark_titlebar(TITLE)
+    theme.enable_taskbar_icon(TITLE, icon_path)
 
     while dpg.is_dearpygui_running():
         dpg.render_dearpygui_frame()

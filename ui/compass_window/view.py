@@ -1,235 +1,218 @@
 """
-Rendering for the compass canvas: grid, axes, country points, hover
-tooltip. No zoom/pan -- the default 80%-of-screen view is the only view, so
-point/label sizes (theme.LAYOUT.point_radius*, *_label_size) are tuned to
-read clearly on their own.
+Rendering for the compass canvas: grid, axes, country points, hover tooltip.
 
-Split into stages on purpose, so the window can avoid redrawing every
-single frame (recreating ~20+ draw items 60x/second caused visible
-flicker/jank):
+The maths (val_to_px / compute_visible_points / find_hovered) are plain functions with no tkinter in
+them. CompassCanvas draws them on a tk.Canvas in two layers so mouse movement stays cheap:
 
-  - compute_visible_points() / find_hovered() are cheap, pure calculations
-    (no dpg.draw_* calls) run every frame to check whether anything
-    actually changed (mouse moved onto a new country, etc).
-  - draw_compass() does the actual (comparatively expensive) drawing, and
-    is only called when that check says something did change.
+  - the base layer (grid, axes, points, hover ring) is redrawn only when something that changes the
+    picture changed: window resized, year/search changed, data changed, or the hovered country changed
+  - the tooltip layer (tag "tip") is redrawn on every mouse move while a country is hovered
 
-CompassCanvas ties those two stages together and owns the "did anything
-change since last frame" cache, so compass_window/window.py only has to
-call canvas.render(...) once per frame -- it doesn't touch drawing or
-caching details itself.
+The values it plots come from data.scoring.get_scores(year) -- the average of all entries of that year.
 """
 
 from __future__ import annotations
 
 import math
+import tkinter as tk
 
-import dearpygui.dearpygui as dpg
+from data import scoring, store
+from .. import style
+from ..style import LAYOUT
 
-from .. import theme
-from ..theme import LAYOUT
 
+# -- pure maths (no tkinter) -----------------------------------------------------------
 
 def val_to_px(left_right: float, lib_auth: float, w: int, h: int) -> tuple[float, float]:
-    pad = LAYOUT.padding
+    pad = LAYOUT.plot_padding
     x = pad + ((left_right + 100) / 200.0) * (w - 2 * pad)
     y = pad + ((100 - lib_auth) / 200.0) * (h - 2 * pad)
     return x, y
 
 
-def compute_visible_points(countries: list, scores: dict, year: str, search_query: str, w: int, h: int) -> list:
+def compute_visible_points(scores: dict, countries: dict, search_query: str, w: int, h: int) -> list[dict]:
+    """scores: {country_id: Score}; countries: {country_id: Country}."""
     points = []
-    for country in countries:
-        score = scores.get(str(country["index"]), {}).get(year)
-        if not score:
-            continue
-        matches = not search_query or search_query in country["name"].lower()
-        px, py = val_to_px(score["left_right"], score["lib_auth"], w, h)
+    for country_id, score in scores.items():
+        country = countries[country_id]
+        px, py = val_to_px(score.left_right, score.lib_auth, w, h)
+        matches = not search_query or search_query in country.name.lower()
         points.append({"country": country, "score": score, "px": px, "py": py, "match": matches})
     return points
 
 
-def find_hovered(points: list, rel_mx: float, rel_my: float) -> dict | None:
+def find_hovered(points: list[dict], mx: float, my: float) -> dict | None:
     hovered = None
     for p in points:
-        if p["match"] and math.hypot(rel_mx - p["px"], rel_my - p["py"]) < LAYOUT.hover_hit_distance:
-            hovered = p
+        if p["match"] and math.hypot(mx - p["px"], my - p["py"]) < LAYOUT.hover_hit_distance:
+            hovered = p          # later points sit on top, so the last hit wins
     return hovered
 
 
-def _draw_quadrant_labels(drawlist: str, w: int, h: int) -> None:
-    pad = LAYOUT.padding
-    size = LAYOUT.quadrant_label_size
-    # widths below are rough char-count * size/1.8 estimates so the
-    # right-aligned labels don't run past the frame at any UI_SCALE
-    labels = {
-        (pad + 10, pad + 10): "AUTHORITARIAN LEFT",
-        (w - pad - 19 * size * 0.62, pad + 10): "AUTHORITARIAN RIGHT",
-        (pad + 10, h - pad - size - 8): "LIBERTARIAN LEFT",
-        (w - pad - 17 * size * 0.62, h - pad - size - 8): "LIBERTARIAN RIGHT",
-    }
-    for pos, text in labels.items():
-        dpg.draw_text(pos, text, color=theme.COLOR_QUADRANT_LABEL, size=size, parent=drawlist)
+def fmt(value: float) -> str:
+    return str(int(value)) if float(value).is_integer() else f"{value:.1f}"
 
 
-def _draw_grid(drawlist: str, w: int, h: int) -> None:
-    pad = LAYOUT.padding
-    for i in range(-80, 90, 20):
-        if i == 0:
-            continue
-        px, py = val_to_px(i, i, w, h)
-        dpg.draw_line((px, pad), (px, h - pad), color=theme.COLOR_GRID, thickness=1, parent=drawlist)
-        dpg.draw_line((pad, py), (w - pad, py), color=theme.COLOR_GRID, thickness=1, parent=drawlist)
+# -- the canvas ------------------------------------------------------------------------------
 
+class CompassCanvas(tk.Canvas):
+    def __init__(self, parent):
+        super().__init__(parent, bg=style.COLOR_BG_LIGHT, highlightthickness=1,
+                         highlightbackground=style.COLOR_DARK, bd=0)
+        self.year = ""
+        self.search_query = ""
+        self._points: list[dict] = []
+        self._hovered: dict | None = None
 
-def _draw_axes(drawlist: str, w: int, h: int) -> None:
-    pad = LAYOUT.padding
-    cx, cy = w / 2.0, h / 2.0
-    dpg.draw_line((cx, pad), (cx, h - pad), color=theme.COLOR_AXIS, thickness=1.5, parent=drawlist)
-    dpg.draw_line((pad, cy), (w - pad, cy), color=theme.COLOR_AXIS, thickness=1.5, parent=drawlist)
+        self.bind("<Configure>", lambda _e: self.redraw())
+        self.bind("<Motion>", self._on_motion)
+        self.bind("<Leave>", self._on_leave)
 
+    # -- state from the window ---------------------------------------------------------
 
-def _draw_axis_ticks(drawlist: str, w: int, h: int) -> None:
-    # plain numbers instead of "LEFT (-100)" / "AUTHORITARIAN (+100)" style
-    # text -- one tick per gridline, small and unobtrusive
-    size = LAYOUT.tick_label_size
-    char_w = size * 0.56
-    cx, cy = w / 2.0, h / 2.0
+    def set_year(self, year: str) -> None:
+        self.year = year
+        self.redraw()
 
-    for v in range(-100, 101, 20):
-        if v == 0:
-            continue  # would collide with the "0" drawn on the y-axis below
-        x, _ = val_to_px(v, 0, w, h)
-        label = str(v)
-        dpg.draw_text((x - len(label) * char_w / 2, cy + 6), label,
-                      color=theme.COLOR_STATUS_TEXT, size=size, parent=drawlist)
+    def set_search(self, query: str) -> None:
+        self.search_query = query.lower().strip()
+        self.redraw()
 
-    for v in range(-100, 101, 20):
-        _, y = val_to_px(0, v, w, h)
-        label = str(v)
-        dpg.draw_text((cx - len(label) * char_w - 8, y - size / 2), label,
-                      color=theme.COLOR_STATUS_TEXT, size=size, parent=drawlist)
+    def refresh(self) -> None:
+        """Data changed underneath (an entry was added/edited/deleted): re-read and redraw."""
+        self.redraw()
 
+    # -- drawing -------------------------------------------------------------------------
 
-def _draw_tooltip(drawlist: str, point: dict, mx: float, my: float, w: int, h: int, evaluations: dict) -> None:
-    country, score = point["country"], point["score"]
-    eval_info = evaluations.get("evaluations", {}).get(score.get("rubric_id"), {})
+    def redraw(self) -> None:
+        w, h = self.winfo_width(), self.winfo_height()
+        if w <= 1 or h <= 1:
+            return                                   # not laid out yet; <Configure> will call us again
+        self.delete("all")
 
-    card_w, card_h = LAYOUT.tooltip_w, LAYOUT.tooltip_h
-    tx = min(mx + 15, w - card_w - 10)
-    ty = min(my + 15, h - card_h - 10)
+        scores = scoring.get_scores(self.year) if self.year else {}
+        countries = {c.index: c for c in store.countries()}
+        self._points = compute_visible_points(scores, countries, self.search_query, w, h)
+        if self._hovered is not None:                 # keep the hover ring across a redraw if that country is still there
+            hid = self._hovered["country"].index
+            self._hovered = next((p for p in self._points if p["country"].index == hid and p["match"]), None)
 
-    dpg.draw_rectangle(
-        (tx, ty), (tx + card_w, ty + card_h),
-        color=theme.COLOR_TOOLTIP_BORDER, fill=theme.COLOR_TOOLTIP_BG,
-        rounding=5, thickness=1, parent=drawlist,
-    )
+        self._draw_quadrant_labels(w, h)
+        self._draw_grid(w, h)
+        self._draw_axes(w, h)
+        self._draw_ticks(w, h)
+        self._draw_points()
+        if not self._points:
+            self._draw_empty_note(w, h)
 
-    title_size = LAYOUT.tooltip_title_size
-    text_size = LAYOUT.tooltip_text_size
-    line = title_size + 6
-    max_chars = round(card_w / (text_size * 0.58))
+    def _draw_quadrant_labels(self, w: int, h: int) -> None:
+        pad = LAYOUT.plot_padding
+        off = style.px(10)
+        kw = dict(fill=style.COLOR_QUADRANT_LABEL, font=style.FONT_QUADRANT)
+        self.create_text(pad + off, pad + off, text="AUTHORITARIAN LEFT", anchor="nw", **kw)
+        self.create_text(pad + off, h - pad - off, text="LIBERTARIAN LEFT", anchor="sw", **kw)
+        self.create_text(w - pad - off, pad + off, text="AUTHORITARIAN RIGHT", anchor="ne", **kw)
+        self.create_text(w - pad - off, h - pad - off, text="LIBERTARIAN RIGHT", anchor="se", **kw)
 
-    code = f"[{country['code']}] " if country.get("code") else ""
-    dpg.draw_text((tx + 12, ty + 8), f"{code}{country['name']}", color=theme.COLOR_FG,
-                  size=title_size, parent=drawlist)
+    def _draw_grid(self, w: int, h: int) -> None:
+        pad = LAYOUT.plot_padding
+        for i in range(-80, 90, 20):
+            if i == 0:
+                continue
+            px, py = val_to_px(i, i, w, h)
+            self.create_line(px, pad, px, h - pad, fill=style.COLOR_GRID)
+            self.create_line(pad, py, w - pad, py, fill=style.COLOR_GRID)
 
-    coords = f"Left/Right: {score['left_right']} | Lib/Auth: {score['lib_auth']}"
-    dpg.draw_text((tx + 12, ty + 8 + line), coords, color=theme.COLOR_STATUS_TEXT,
-                  size=text_size, parent=drawlist)
+    def _draw_axes(self, w: int, h: int) -> None:
+        pad = LAYOUT.plot_padding
+        cx, cy = w / 2.0, h / 2.0
+        self.create_line(cx, pad, cx, h - pad, fill=style.COLOR_AXIS, width=2)
+        self.create_line(pad, cy, w - pad, cy, fill=style.COLOR_AXIS, width=2)
 
-    summary = eval_info.get("summary", "No summary available.")
-    if len(summary) > max_chars:
-        summary = summary[:max_chars - 3] + "..."
-    dpg.draw_text((tx + 12, ty + 8 + 2 * line), summary, color=theme.COLOR_FG,
-                  size=text_size, parent=drawlist)
+    def _draw_ticks(self, w: int, h: int) -> None:
+        # one plain number per gridline; anchors do the centring, no text measuring needed
+        cx, cy = w / 2.0, h / 2.0
+        for v in range(-100, 101, 20):
+            if v == 0:
+                continue
+            x, _ = val_to_px(v, 0, w, h)
+            self.create_text(x, cy + style.px(6), text=str(v), anchor="n", fill=style.COLOR_STATUS_TEXT, font=style.FONT_TICK)
+            _, y = val_to_px(0, v, w, h)
+            self.create_text(cx - style.px(8), y, text=str(v), anchor="e", fill=style.COLOR_STATUS_TEXT, font=style.FONT_TICK)
 
-    just = eval_info.get("justification", {})
-    detail = " \u2022 ".join(filter(None, (just.get("left_right"), just.get("lib_auth")))) or "No details available."
-    if len(detail) > max_chars:
-        detail = detail[:max_chars - 3] + "..."
-    dpg.draw_text((tx + 12, ty + 8 + 3 * line), detail, color=theme.COLOR_STATUS_TEXT,
-                  size=text_size, parent=drawlist)
+    def _draw_points(self) -> None:
+        r, r_hover, r_dim = LAYOUT.point_radius, LAYOUT.point_radius_hover, LAYOUT.dim_radius
+        gap = style.px(6)
+        # dimmed (non-matching) points first so matches sit on top
+        for p in sorted(self._points, key=lambda p: p["match"]):
+            x, y, name = p["px"], p["py"], p["country"].name
+            if not p["match"]:
+                self.create_oval(x - r_dim, y - r_dim, x + r_dim, y + r_dim, fill=style.COLOR_POINT_DIM, outline="")
+                continue
+            if self._hovered is p:
+                ring = r_hover + style.px(3)
+                self.create_oval(x - ring, y - ring, x + ring, y + ring, outline=style.COLOR_POINT_HOVER_RING, width=2)
+                self.create_oval(x - r_hover, y - r_hover, x + r_hover, y + r_hover, fill=style.COLOR_POINT_HOVER, outline="")
+                label_y, color = y + r_hover + gap, style.COLOR_FG
+            else:
+                self.create_oval(x - r, y - r, x + r, y + r, fill=style.COLOR_POINT, outline="")
+                label_y, color = y + r + gap, style.COLOR_STATUS_TEXT
+            self.create_text(x, label_y, text=name, anchor="n", fill=color, font=style.FONT_COUNTRY_LABEL)
 
+    def _draw_empty_note(self, w: int, h: int) -> None:
+        text = f"No data for {self.year} yet." if self.year else "No data yet."
+        self.create_text(w / 2, h / 2 - style.px(50), text=text, fill=style.COLOR_STATUS_TEXT, font=style.FONT_TITLE)
+        self.create_text(w / 2, h / 2 - style.px(50) + style.px(28), text='Click "Data" below and add entries for a country.',
+                         fill=style.COLOR_HINT, font=style.FONT_NORMAL)
 
-def draw_compass(
-    drawlist: str, w: int, h: int, points: list, hovered: dict | None,
-    evaluations: dict, rel_mx: float, rel_my: float,
-) -> None:
-    dpg.delete_item(drawlist, children_only=True)
+    # -- hover ----------------------------------------------------------------------------
 
-    _draw_quadrant_labels(drawlist, w, h)
-    _draw_grid(drawlist, w, h)
-    _draw_axes(drawlist, w, h)
-    _draw_axis_ticks(drawlist, w, h)
+    def _on_motion(self, event) -> None:
+        hovered = find_hovered(self._points, event.x, event.y)
+        self.configure(cursor="hand2" if hovered else "")
+        if hovered is not self._hovered:
+            self._hovered = hovered
+            self.redraw()
+        self.delete("tip")
+        if hovered is not None:
+            self._draw_tooltip(hovered, event.x, event.y)
 
-    # draw dimmed/non-matching points first so matches sit on top
-    for p in sorted(points, key=lambda p: p["match"]):
-        px, py = p["px"], p["py"]
-        is_hovered = hovered is not None and hovered["country"]["index"] == p["country"]["index"]
+    def _on_leave(self, _event=None) -> None:
+        self.delete("tip")
+        if self._hovered is not None:
+            self._hovered = None
+            self.redraw()
 
-        if not p["match"]:
-            dpg.draw_circle((px, py), 2.5, color=theme.COLOR_POINT_DIM, fill=theme.COLOR_POINT_DIM, parent=drawlist)
-            continue
+    def _draw_tooltip(self, point: dict, mx: float, my: float) -> None:
+        country, score = point["country"], point["score"]
+        entries = store.entries(country.index, self.year)
+        latest = entries[-1] if entries else None
 
-        if is_hovered:
-            dpg.draw_circle((px, py), LAYOUT.point_radius_hover + 3, color=theme.COLOR_POINT_HOVER_RING,
-                             thickness=1.5, parent=drawlist)
-            dpg.draw_circle((px, py), LAYOUT.point_radius_hover, color=theme.COLOR_POINT_HOVER,
-                             fill=theme.COLOR_POINT_HOVER, parent=drawlist)
-            name_size = LAYOUT.country_label_size
-            dpg.draw_text((px - len(p["country"]["name"]) * name_size * 0.28, py + LAYOUT.point_radius_hover + 6),
-                          p["country"]["name"], color=theme.COLOR_FG, size=name_size, parent=drawlist)
-        else:
-            dpg.draw_circle((px, py), LAYOUT.point_radius, color=theme.COLOR_POINT, fill=theme.COLOR_POINT,
-                             parent=drawlist)
-            name_size = LAYOUT.country_label_size
-            dpg.draw_text((px - len(p["country"]["name"]) * name_size * 0.26, py + LAYOUT.point_radius + 6),
-                          p["country"]["name"], color=theme.COLOR_STATUS_TEXT, size=name_size, parent=drawlist)
+        n = score.count
+        lines = [
+            (country.name, style.FONT_BOLD, style.COLOR_FG),
+            (f"Left/Right: {fmt(score.left_right)} | Lib/Auth: {fmt(score.lib_auth)}", style.FONT_NORMAL, style.COLOR_STATUS_TEXT),
+            (f"Average of {n} entries" if n > 1 else "1 entry", style.FONT_NORMAL, style.COLOR_HINT),
+        ]
+        if latest is not None:
+            lines.append((latest.summary or "No summary available.", style.FONT_NORMAL, style.COLOR_FG))
+            detail = " \u2022 ".join(filter(None, (latest.justification_lr, latest.justification_la)))
+            lines.append((detail or "No details available.", style.FONT_NORMAL, style.COLOR_STATUS_TEXT))
 
-    if hovered:
-        _draw_tooltip(drawlist, hovered, rel_mx, rel_my, w, h, evaluations)
+        pad, width = LAYOUT.tooltip_padding, LAYOUT.tooltip_width
+        items, y = [], 0
+        for text, font, color in lines:                 # stack the lines at (0, 0) first to learn the height
+            item = self.create_text(0, y, text=text, font=font, fill=color, anchor="nw", width=width - 2 * pad, tags="tip")
+            x0, y0, x1, y1 = self.bbox(item)
+            items.append(item)
+            y = y1 + style.px(3)
+        total_h = y + 2 * pad
 
-
-class CompassCanvas:
-    """
-    Owns one drawlist: computing the visible points, hit-testing the mouse
-    against them, and (only when something actually changed) redrawing.
-
-    compass_window/window.py just constructs one of these against its
-    drawlist tag and calls .render(...) once per frame -- it doesn't touch
-    compute_visible_points/find_hovered/draw_compass or the "did anything
-    change" cache directly anymore.
-    """
-
-    def __init__(self, drawlist_tag: str):
-        self.tag = drawlist_tag
-        self._last_render_key = None
-
-    def render(self, countries: list, scores: dict, evaluations: dict, year: str, search_query: str) -> None:
-        w = dpg.get_item_width(self.tag)
-        h = dpg.get_item_height(self.tag)
-        if not w or not h or w <= 0 or h <= 0:
-            return
-
-        points = compute_visible_points(countries, scores, year, search_query, w, h)
-
-        rect_min = dpg.get_item_rect_min(self.tag)
-        mouse = dpg.get_mouse_pos(local=False)
-        rel_mx, rel_my = mouse[0] - rect_min[0], mouse[1] - rect_min[1]
-        hovered = find_hovered(points, rel_mx, rel_my)
-        hovered_id = hovered["country"]["index"] if hovered else None
-
-        # only pay for the actual (comparatively expensive) draw when
-        # something that affects the picture changed since last frame --
-        # most frames nothing does, so most frames draw nothing at all.
-        # Mouse position only matters for the render while something is
-        # actually hovered (it moves the tooltip) -- otherwise moving the
-        # mouse across empty canvas would force a redraw every frame again.
-        mouse_component = (round(rel_mx), round(rel_my)) if hovered_id is not None else None
-        render_key = (year, search_query, w, h, hovered_id, mouse_component)
-        if render_key == self._last_render_key:
-            return
-        self._last_render_key = render_key
-
-        draw_compass(self.tag, w, h, points, hovered, evaluations, rel_mx, rel_my)
+        cw, ch = self.winfo_width(), self.winfo_height()
+        tx = max(5, min(mx + 15, cw - width - 10))
+        ty = max(5, min(my + 15, ch - total_h - 10))
+        for item in items:
+            self.move(item, tx + pad, ty + pad)
+        box = self.create_rectangle(tx, ty, tx + width, ty + total_h, fill=style.COLOR_TOOLTIP_BG,
+                                    outline=style.COLOR_TOOLTIP_BORDER, tags="tip")
+        self.tag_lower(box, items[0])

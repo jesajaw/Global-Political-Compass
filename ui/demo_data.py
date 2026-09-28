@@ -7,17 +7,17 @@ checkout, before scripts/agent.py has produced any real evaluations.
 """
 
 DEFAULT_COUNTRIES = [
-    {"index": 63, "name": "Germany", "code": "DE"},
-    {"index": 187, "name": "United States", "code": "US"},
-    {"index": 36, "name": "China", "code": "CN"},
-    {"index": 170, "name": "Switzerland", "code": "CH"},
+    {"index": 63, "name": "Germany"},
+    {"index": 187, "name": "United States"},
+    {"index": 36, "name": "China"},
+    {"index": 170, "name": "Switzerland"},
 ]
 
 DEFAULT_SCORES = {
-    "63": {"2024": {"left_right": -8, "lib_auth": -15, "rubric_id": "demo-de-2024"}},
-    "187": {"2024": {"left_right": 12, "lib_auth": 5, "rubric_id": "demo-us-2024"}},
-    "36": {"2024": {"left_right": 30, "lib_auth": 78, "rubric_id": "demo-cn-2024"}},
-    "170": {"2024": {"left_right": -5, "lib_auth": -35, "rubric_id": "demo-ch-2024"}},
+    "63": {"2024": {"left_right": 0, "lib_auth": 0, "rubric_id": "demo-de-2024"}},
+    "187": {"2024": {"left_right": 10, "lib_auth": 10, "rubric_id": "demo-us-2024"}},
+    "36": {"2024": {"left_right": 30, "lib_auth": 60, "rubric_id": "demo-cn-2024"}},
+    "170": {"2024": {"left_right": 20, "lib_auth": 40, "rubric_id": "demo-ch-2024"}},
 }
 
 DEFAULT_EVALUATIONS = {

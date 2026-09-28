@@ -1,133 +1,92 @@
 """
-The main compass window: a bordered canvas "cell" that fills almost the
-entire window, and a slim centered control row (search / year / "Data"
-button) pinned below it.
+The main compass window: a bordered canvas that fills almost the entire window, and a slim centered
+control row (Data tile / search / year) pinned below it -- same layout as before, now in tkinter.
 
-All widget construction and DPG callbacks for this window live here --
-drawing the actual compass is view.py's CompassCanvas, shared app state is
-..state, all colors/sizes come from ..theme. Nothing here is built or
-styled ad hoc, and this window never draws directly -- it just wires
-current state into canvas.render() once per frame.
-
-No zoom/pan: the default 80%-of-screen view is the only view (see
-theme.LAYOUT's bigger point/text sizes). CompassCanvas only pays for an
-actual redraw when something that affects the picture changed since last
-frame -- recreating every draw item unconditionally at the render loop's
-full rate was the actual source of the visible flicker/jank.
+This window only wires things together: the drawing is view.CompassCanvas, the numbers come from
+data.scoring (via the canvas), the colours/sizes from ..style. It also owns the Data window (one
+instance at a time) and refreshes itself whenever that window changes something.
 """
 
-from __future__ import annotations
+import tkinter as tk
+from tkinter import ttk
 
-from typing import Callable
-
-import dearpygui.dearpygui as dpg
-
-from .. import theme
-from ..state import CompassState
+from data import store
+from .. import style
+from ..style import LAYOUT
+from ..widgets import Cell, HintEntry
 from . import view
 
 WINDOW_TITLE = "Global Political Compass Engine"
+SCREEN_FRACTION = 0.8
 
 
 class CompassWindow:
     TITLE = WINDOW_TITLE
 
-    TAG_WINDOW = "primary_window"
-    TAG_CANVAS_FRAME = "compass_canvas_frame"
-    TAG_DRAWLIST = "compass_drawlist"
-    TAG_YEAR_COMBO = "year_combo"
-    TAG_EDITOR_BUTTON = "editor_toggle_button"
+    def __init__(self, root: tk.Tk):
+        self.root = root
+        self._data_window = None
 
-    def __init__(self, state: CompassState, on_open_editor: Callable[[], None]):
-        self.state = state
-        self.on_open_editor = on_open_editor
-        # owns compute/hit-test/draw + the "did anything change" cache for
-        # the canvas -- this window only calls .render() once per frame
-        self.canvas = view.CompassCanvas(self.TAG_DRAWLIST)
+        root.title(self.TITLE)
+        style.apply_style(root)
+        style.set_window_icon(root)
+        self._size_and_center(root)
+        root.minsize(style.px(640), style.px(480))
 
-    # -- construction -----------------------------------------------------
+        self._build()
+        self._refresh_years()
 
-    def build(self) -> None:
-        with dpg.window(tag=self.TAG_WINDOW, label=self.TITLE):
-            # a bordered "cell" that fills almost the entire window -- only
-            # the control row below it is reserved space. The drawlist
-            # sits inset a little inside it so the plot has room to be
-            # readable instead of floating in a window that's mostly empty
-            # margin around a small canvas.
-            with dpg.child_window(tag=self.TAG_CANVAS_FRAME, border=True):
-                with dpg.drawlist(tag=self.TAG_DRAWLIST, width=820, height=720):
-                    pass
+    # -- construction -------------------------------------------------------------------
 
-            dpg.add_spacer(height=8)
+    def _size_and_center(self, root) -> None:
+        sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
+        w, h = round(sw * SCREEN_FRACTION), round(sh * SCREEN_FRACTION)
+        root.geometry(f"{w}x{h}+{(sw - w) // 2}+{(sh - h) // 2}")
 
-            # a slim control row below the cell. A 3-column table with
-            # equal-weight spacer columns either side of a fixed-width
-            # middle column keeps the whole cluster centered at any window
-            # width, and the controls sit in one horizontal group so they
-            # read as a single row of "keys" next to each other. Only the
-            # "Data" button lives here now -- there's nothing left for a
-            # separate "Load" button to do, since editing (via the data
-            # editor) writes straight into the same in-memory state this
-            # window already reads from.
-            control_width = theme.LAYOUT.data_button_w + theme.LAYOUT.search_width + theme.LAYOUT.combo_width + 20
-            with dpg.table(header_row=False, borders_innerV=False, borders_outerV=False,
-                            borders_innerH=False, borders_outerH=False):
-                dpg.add_table_column(init_width_or_weight=1)
-                dpg.add_table_column(width_fixed=True, init_width_or_weight=control_width)
-                dpg.add_table_column(init_width_or_weight=1)
-                with dpg.table_row():
-                    dpg.add_spacer()
-                    with dpg.group(horizontal=True):
-                        # plain text label, not an icon glyph: DPG's
-                        # default/fallback font has no symbol codepoints
-                        # (e.g. the U+2699 gear used before rendered as a
-                        # tofu/placeholder box)
-                        dpg.add_button(tag=self.TAG_EDITOR_BUTTON, label="Data",
-                                        width=theme.LAYOUT.data_button_w, height=theme.LAYOUT.data_button_h,
-                                        callback=lambda: self.on_open_editor())
-                        dpg.add_input_text(hint="Search country...", width=theme.LAYOUT.search_width,
-                                            callback=self._on_search)
-                        dpg.add_combo(tag=self.TAG_YEAR_COMBO, items=self.state.available_years,
-                                      default_value=self.state.selected_year, width=theme.LAYOUT.combo_width,
-                                      callback=self._on_year_change)
-                    dpg.add_spacer()
+    def _build(self) -> None:
+        frame = ttk.Frame(self.root, padding=12)
+        frame.pack(fill="both", expand=True)
 
-    # -- callbacks ----------------------------------------------------------
+        self.canvas = view.CompassCanvas(frame)
+        self.canvas.pack(fill="both", expand=True)
 
-    def _on_search(self, _sender, value: str) -> None:
-        self.state.search_query = value.lower().strip()
+        # slim control row below the canvas; packing it without fill keeps the cluster centered at any width
+        row = ttk.Frame(frame)
+        row.pack(pady=(10, 0))
 
-    def _on_year_change(self, _sender, value: str) -> None:
-        self.state.selected_year = value
+        Cell(row, "Data", on_click=self._open_data, width=LAYOUT.data_button_width, height=LAYOUT.control_height) \
+            .pack(side="left", padx=(0, 8))
 
-    # -- layout ---------------------------------------------------------------
+        self.search = HintEntry(row, "Search country...", on_change=self.canvas.set_search, width=LAYOUT.search_width_chars)
+        self.search.pack(side="left", padx=(0, 8), ipady=6)
 
-    def on_viewport_resize(self) -> None:
-        # the cell fills the whole window except the control row below it
-        # and a little margin -- keeps it filling the window as it resizes
-        # instead of staying pinned at its initial size
-        w = dpg.get_viewport_client_width() - 2 * theme.LAYOUT.padding
-        h = dpg.get_viewport_client_height() - theme.LAYOUT.control_bar_height - 2 * theme.LAYOUT.padding
-        frame_w = max(w, theme.LAYOUT.canvas_min)
-        frame_h = max(h, theme.LAYOUT.canvas_min)
-        dpg.configure_item(self.TAG_CANVAS_FRAME, width=frame_w, height=frame_h)
+        self.year_var = tk.StringVar()
+        self.year_combo = ttk.Combobox(row, textvariable=self.year_var, state="readonly", width=LAYOUT.combo_width_chars)
+        self.year_combo.pack(side="left", ipady=4)
+        self.year_combo.bind("<<ComboboxSelected>>", lambda _e: self.canvas.set_year(self.year_var.get()))
 
-        inset = 2 * theme.LAYOUT.window_padding
-        dpg.configure_item(self.TAG_DRAWLIST, width=max(frame_w - inset, theme.LAYOUT.canvas_min // 2),
-                            height=max(frame_h - inset, theme.LAYOUT.canvas_min // 2))
+    # -- data window ----------------------------------------------------------------------
 
-    def refresh_year_combo(self) -> None:
-        # called by the data editor after it adds/removes a year entry
-        if dpg.does_item_exist(self.TAG_YEAR_COMBO):
-            dpg.configure_item(self.TAG_YEAR_COMBO, items=self.state.available_years,
-                                default_value=self.state.selected_year)
+    def _open_data(self) -> None:
+        from ..data_window import DataWindow    # imported here: it pulls in the agent, no need to load it before it's needed
 
-    # -- render loop --------------------------------------------------------
+        if self._data_window is not None and self._data_window.winfo_exists():
+            self._data_window.deiconify()
+            self._data_window.lift()
+            self._data_window.focus_force()
+            return
+        self._data_window = DataWindow(self.root, on_data_changed=self.refresh)
 
-    def render_frame(self) -> None:
-        # all compute/hit-test/draw + the "did anything change" cache lives
-        # in view.CompassCanvas now -- this is just wiring current state in
-        self.canvas.render(
-            self.state.countries, self.state.scores, self.state.evaluations,
-            self.state.selected_year, self.state.search_query,
-        )
+    # -- state ----------------------------------------------------------------------------------
+
+    def _refresh_years(self) -> None:
+        years = store.all_years()
+        self.year_combo.configure(values=years)
+        if self.year_var.get() not in years:
+            self.year_var.set(years[0] if years else "")     # newest year, or blank if there's no data at all
+        self.year_combo.configure(state="readonly" if years else "disabled")
+        self.canvas.set_year(self.year_var.get())
+
+    def refresh(self) -> None:
+        """Called by the Data window after it added/edited/deleted an entry."""
+        self._refresh_years()
