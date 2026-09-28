@@ -25,3 +25,5 @@ Thumbs.db
 models/
 .venv/
 __pycache__/
+
+data/countries/*.json
