@@ -92,6 +92,7 @@ class ToolWindow(tk.Toplevel):
         self.content = ttk.Frame(self, padding=10)
         self.content.pack(fill="both", expand=True)
 
+
 class HintEntry(ttk.Entry):
     """
     Entry with a grey placeholder. value() is always the real text ("" while the hint is showing);

@@ -50,19 +50,32 @@ class CompassWindow:
         self.canvas = view.CompassCanvas(frame)
         self.canvas.pack(fill="both", expand=True)
 
-        # slim control row below the canvas; packing it without fill keeps the cluster centered at any width
+        # slim control row below the canvas; packing it without fill keeps the cluster centered at any width.
+        # Entry/Combobox size themselves by font metrics, not by a pixel height like Cell does, so
+        # left to themselves they never quite match Cell's height. Each gets wrapped in its own
+        # fixed-height frame (pack_propagate(False), same trick Cell itself uses) so all three
+        # controls are exactly LAYOUT.control_height tall, no matter the platform's default widget size.
         row = ttk.Frame(frame)
         row.pack(pady=(10, 0))
+
+        def _boxed(width: int) -> ttk.Frame:
+            box = ttk.Frame(row, width=width, height=LAYOUT.control_height)
+            box.pack_propagate(False)
+            box.pack(side="left", padx=(0, 8))
+            return box
 
         Cell(row, "Data", on_click=self._open_data, width=LAYOUT.data_button_width, height=LAYOUT.control_height) \
             .pack(side="left", padx=(0, 8))
 
-        self.search = HintEntry(row, "Search country...", on_change=self.canvas.set_search, width=LAYOUT.search_width_chars)
-        self.search.pack(side="left", padx=(0, 8), ipady=6)
+        search_box = _boxed(style.px(LAYOUT.search_width_chars * 9))
+        self.search = HintEntry(search_box, "Search country...", on_change=self.canvas.set_search)
+        self.search.pack(fill="both", expand=True)
 
+        year_box = _boxed(style.px(LAYOUT.combo_width_chars * 9 + 14))
+        year_box.pack(padx=0)                        # last control in the row -- no trailing gap
         self.year_var = tk.StringVar()
-        self.year_combo = ttk.Combobox(row, textvariable=self.year_var, state="readonly", width=LAYOUT.combo_width_chars)
-        self.year_combo.pack(side="left", ipady=4)
+        self.year_combo = ttk.Combobox(year_box, textvariable=self.year_var, state="readonly")
+        self.year_combo.pack(fill="both", expand=True)
         self.year_combo.bind("<<ComboboxSelected>>", lambda _e: self.canvas.set_year(self.year_var.get()))
 
     # -- data window ----------------------------------------------------------------------

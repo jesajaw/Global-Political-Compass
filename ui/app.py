@@ -26,6 +26,6 @@ def main_editor() -> None:
     style.apply_style(root)
     style.set_window_icon(root)
     root.geometry(style.LAYOUT.data_window_size)
-    root.minsize(style.px(820), style.px(600))
+    root.minsize(style.px(1080), style.px(620))
     DataView(root, on_data_changed=lambda: None, padding=10).pack(fill="both", expand=True)
     root.mainloop()

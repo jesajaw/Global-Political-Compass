@@ -1,0 +1,4 @@
+# one country name per line (as in data/countries.json); "#" lines and empty lines are ignored
+Germany
+France
+Poland

@@ -25,5 +25,4 @@ Thumbs.db
 models/
 .venv/
 __pycache__/
-
-data/countries/*.json
+agent/set_backend.ps1

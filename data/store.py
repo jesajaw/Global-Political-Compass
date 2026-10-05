@@ -33,7 +33,8 @@ import re
 from datetime import date
 from pathlib import Path
 
-from .models import Country, Entry, SCORE_MIN, SCORE_MAX
+from .categories import axes_from_categories
+from .models import CategoryRating, Country, Entry, Origin, SCORE_MIN, SCORE_MAX
 
 DATA_DIR = Path(__file__).resolve().parent
 COUNTRIES_FILE = DATA_DIR / "countries.json"
@@ -158,18 +159,40 @@ def _new_id(country_id: int) -> str:
     return f"{stem}{n}"
 
 
+def _coerce_categories(categories: dict | None) -> dict[str, CategoryRating]:
+    if not categories:
+        return {}
+    return {k: v if isinstance(v, CategoryRating) else CategoryRating(**v) for k, v in categories.items()}
+
+
 def add_entry(
-    country_id: int, year: str, left_right: int, lib_auth: int, *,
-    summary: str = "", justification_lr: str = "", justification_la: str = "",
-    sources: list[str] | None = None, origin: str = "manual",
+    country_id: int, year: str, left_right: int | None = None, lib_auth: int | None = None, *,
+    categories: dict | None = None, summary: str = "", justification_lr: str = "", justification_la: str = "",
+    sources: list[str] | None = None, sources_verified: dict[str, bool] | None = None,
+    origin: Origin = "manual", model: str = "", review_notes: str = "", reviewed_by: str = "",
 ) -> Entry:
+    """
+    Either pass left_right/lib_auth directly (a quick manual entry), or pass `categories`
+    (category id -> {"score", "evidence", "confidence"}) and leave left_right/lib_auth out --
+    they are then computed from the categories (data.categories.axes_from_categories). Passing
+    both is fine too (e.g. a human overriding the computed axis values); passing neither raises.
+    """
     country_id = get_country(country_id).index          # raises for unknown ids
+    cats = _coerce_categories(categories)
+    if cats and (left_right is None or lib_auth is None):
+        computed_lr, computed_la = axes_from_categories({k: v.score for k, v in cats.items()})
+        left_right = round(computed_lr) if left_right is None else left_right
+        lib_auth = round(computed_la) if lib_auth is None else lib_auth
+    if left_right is None or lib_auth is None:
+        raise ValueError("Provide left_right/lib_auth, or a category breakdown to compute them from.")
     year, left_right, lib_auth = _validate(year, left_right, lib_auth)
     entry = Entry(
-        id=_new_id(country_id), left_right=left_right, lib_auth=lib_auth,
+        id=_new_id(country_id), left_right=left_right, lib_auth=lib_auth, categories=cats,
         summary=summary.strip(), justification_lr=justification_lr.strip(),
         justification_la=justification_la.strip(), sources=[s.strip() for s in (sources or []) if s.strip()],
-        date_assessed=date.today().isoformat(), origin=origin,
+        sources_verified=dict(sources_verified or {}),
+        date_assessed=date.today().isoformat(), origin=origin, model=model,
+        review_notes=review_notes.strip(), reviewed_by=reviewed_by,
     )
     _load_all().setdefault(country_id, {}).setdefault(year, []).append(entry)
     _write(country_id)                                  # this is where the country's file gets created
@@ -179,12 +202,29 @@ def add_entry(
 def update_entry(
     country_id: int, entry_id: str, *, year: str | None = None,
     left_right: int | None = None, lib_auth: int | None = None,
+    categories: dict | None = None, recompute_from_categories: bool = False,
     summary: str | None = None, justification_lr: str | None = None,
     justification_la: str | None = None, sources: list[str] | None = None,
+    sources_verified: dict[str, bool] | None = None,
+    review_notes: str | None = None, reviewed_by: str | None = None,
 ) -> Entry:
-    """Adjust an existing entry. Passing a different `year` moves it to that year."""
+    """
+    Adjust an existing entry. Passing a different `year` moves it to that year. Editing an
+    "ai" entry promotes its origin to "manual_ai" -- it stays that way even if edited again,
+    since it's no longer an unreviewed agent output either way.
+
+    recompute_from_categories=True re-derives left_right/lib_auth from `categories` (or the
+    entry's existing categories, if `categories` isn't passed); otherwise an explicit
+    left_right/lib_auth always wins, categories are just updated for the record.
+    """
     country_id = int(country_id)
     old_year, entry = _find(country_id, entry_id)
+    if categories is not None:
+        entry.categories = _coerce_categories(categories)
+    if recompute_from_categories and entry.categories:
+        computed_lr, computed_la = axes_from_categories({k: v.score for k, v in entry.categories.items()})
+        left_right = round(computed_lr) if left_right is None else left_right
+        lib_auth = round(computed_la) if lib_auth is None else lib_auth
     new_year, lr, la = _validate(
         year if year is not None else old_year,
         entry.left_right if left_right is None else left_right,
@@ -199,6 +239,14 @@ def update_entry(
         entry.justification_la = justification_la.strip()
     if sources is not None:
         entry.sources = [s.strip() for s in sources if s.strip()]
+    if sources_verified is not None:
+        entry.sources_verified = dict(sources_verified)
+    if review_notes is not None:
+        entry.review_notes = review_notes.strip()
+    if reviewed_by is not None:
+        entry.reviewed_by = reviewed_by
+    if entry.origin == "ai":
+        entry.origin = "manual_ai"
     if new_year != old_year:
         years = _load_all()[country_id]
         years[old_year].remove(entry)

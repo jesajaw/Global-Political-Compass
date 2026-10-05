@@ -1,0 +1,10 @@
+{
+  "_comment": "Illustrative example ONLY -- these numbers are rough, from memory, not sourced from a specific index release, and must NOT be trusted as ground truth. Replace with your own values pulled from an actual, dated source (e.g. a specific year's Economic Freedom of the World index for left_right, a specific year's Freedom House or Cato Human Freedom Index for lib_auth), and record which source/year you used. The point of this file is the MECHANISM (data/calibrate.py), not these particular numbers.",
+  "countries": [
+    {"name": "Singapore", "year": "2023", "left_right": 70, "lib_auth": 45, "source": "REPLACE ME -- e.g. 'Economic Freedom of the World 2023, rank 1; Freedom House 2023 score'"},
+    {"name": "Sweden",    "year": "2023", "left_right": -15, "lib_auth": -60, "source": "REPLACE ME"},
+    {"name": "North Korea","year": "2023", "left_right": -70, "lib_auth": 95, "source": "REPLACE ME"},
+    {"name": "Switzerland","year": "2023", "left_right": 55, "lib_auth": -50, "source": "REPLACE ME"},
+    {"name": "Venezuela", "year": "2023", "left_right": -60, "lib_auth": 60, "source": "REPLACE ME"}
+  ]
+}

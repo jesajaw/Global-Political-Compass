@@ -123,16 +123,20 @@ class Layout:
     hover_hit_distance: int = px(14)
     tooltip_width: int = px(300)
     tooltip_padding: int = px(10)
-    search_width_chars: int = 26
+    search_width_chars: int = 20
     combo_width_chars: int = 8
     control_height: int = px(40)
     data_button_width: int = px(90)
-    data_window_size: str = f"{px(980)}x{px(680)}"
+    data_window_size: str = f"{px(1200)}x{px(720)}"
 
 
 CELL_WIDTH = px(260)
 CELL_HEIGHT = px(110)
 LAYOUT = Layout()
+
+# Shared with compass_window/view.py (tooltip) and data_window/window.py (tree/form) so the
+# wording only lives in one place.
+ORIGIN_LABEL = {"manual": "Manual", "ai": "Agent (unreviewed)", "manual_ai": "Agent (reviewed)"}
 
 ASSETS_DIR = Path(__file__).resolve().parent.parent / "assets"
 ICON_PATH = ASSETS_DIR / "icon.ico"

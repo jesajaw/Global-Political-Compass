@@ -25,9 +25,10 @@ from tkinter import ttk
 
 import agent
 from data import scoring, store
+from data.categories import CATEGORIES
 from .. import dialogs, style
 from ..compass_window.view import fmt
-from ..style import LAYOUT
+from ..style import LAYOUT, ORIGIN_LABEL
 from ..widgets import Cell, HintEntry, ToolWindow
 
 _YEAR_RE = re.compile(r"^\d{4}$")
@@ -118,13 +119,15 @@ class DataView(ttk.Frame):
         # entries, grouped by year
         tree_box = ttk.Frame(right)
         tree_box.pack(fill="both", expand=True)
-        self.tree = ttk.Treeview(tree_box, columns=("lr", "la", "info", "origin"), selectmode="browse", height=8)
+        self.tree = ttk.Treeview(tree_box, columns=("lr", "la", "info", "origin", "model"), selectmode="browse", height=8)
         for column, title, width, anchor in (
-            ("#0", "Year / Entry", 170, "w"), ("lr", "Left/Right", 80, "center"), ("la", "Lib/Auth", 80, "center"),
-            ("info", "Summary", 220, "w"), ("origin", "Origin", 70, "center"),
+            ("#0", "Year / Entry", 150, "w"), ("lr", "Left/Right", 75, "center"), ("la", "Lib/Auth", 75, "center"),
+            ("info", "Summary", 170, "w"), ("origin", "Origin", 120, "center"), ("model", "Model", 110, "center"),
         ):
             self.tree.heading(column, text=title)
-            self.tree.column(column, width=style.px(width), anchor=anchor, stretch=column == "info")
+            # only "info" (Summary) stretches -- the others (esp. "model") must keep their width
+            # when the window grows, or Model gets squeezed back out again
+            self.tree.column(column, width=style.px(width), minwidth=style.px(width), anchor=anchor, stretch=column == "info")
         self.tree.tag_configure("year", font=style.FONT_BOLD)
         scroll = ttk.Scrollbar(tree_box, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=scroll.set)
@@ -156,6 +159,14 @@ class DataView(ttk.Frame):
             ttk.Label(self.form, text=label).grid(row=row, column=0, sticky="nw", padx=(0, 10), pady=3)
             widget.grid(row=row, column=1, sticky="w" if widget is self.year_entry else "ew", pady=3)
 
+        # read-only: only shown for an entry that has a category breakdown (agent entries). Saving
+        # the form still edits Left/Right and Lib/Auth directly -- categories aren't hand-edited
+        # here, that's what re-running the agent is for. This is just so you can SEE what produced
+        # the two numbers above before deciding whether to trust/adjust them.
+        self.category_frame = ttk.LabelFrame(right, text="Category breakdown (read-only, from the agent)", padding=8)
+        self.category_label = ttk.Label(self.category_frame, text="", style="Status.TLabel", justify="left")
+        self.category_label.pack(anchor="w", fill="x")
+
         # action tiles
         buttons = ttk.Frame(right)
         buttons.pack(fill="x")
@@ -165,6 +176,16 @@ class DataView(ttk.Frame):
             ("Evaluate (Agent)", self._evaluate, 160),
         ):
             Cell(buttons, title, on_click=command, width=style.px(width), height=h).pack(side="left", padx=(0, 8))
+
+        # agent options -- plain checkbuttons, not tiles: these are settings for the next
+        # "Evaluate (Agent)" click, not actions of their own
+        options = ttk.Frame(right)
+        options.pack(fill="x", pady=(6, 0))
+        self.verify_sources_var = tk.BooleanVar(value=False)
+        self.review_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(options, text="Verify sources", variable=self.verify_sources_var).pack(side="left", padx=(0, 12))
+        ttk.Checkbutton(options, text="Red-team review", variable=self.review_var).pack(side="left")
+
         self.status = ttk.Label(right, text="", style="Note.TLabel")
         self.status.pack(anchor="w", pady=(8, 0))
 
@@ -207,10 +228,12 @@ class DataView(ttk.Frame):
         for year, score in scoring.yearly_scores(country.index).items():
             info = f"Average of {score.count} entries" if score.count > 1 else "1 entry"
             parent = self.tree.insert("", "end", iid=f"y:{year}", text=year, open=True, tags=("year",),
-                                      values=(fmt(score.left_right), fmt(score.lib_auth), info, ""))
+                                      values=(fmt(score.left_right), fmt(score.lib_auth), info, "", ""))
             for entry in store.entries(country.index, year):
+                summary = entry.summary + ("  [+categories]" if entry.categories else "")
                 self.tree.insert(parent, "end", iid=entry.id, text=entry.id,
-                                 values=(entry.left_right, entry.lib_auth, entry.summary, entry.origin))
+                                 values=(entry.left_right, entry.lib_auth, summary,
+                                         ORIGIN_LABEL.get(entry.origin, entry.origin), entry.model))
         if select_id and self.tree.exists(select_id):
             self.tree.selection_set(select_id)
             self.tree.see(select_id)
@@ -232,7 +255,8 @@ class DataView(ttk.Frame):
 
     def _fill_form(self, entry, year: str) -> None:
         self._editing_id = entry.id
-        self.form.configure(text=f"Edit entry {entry.id}")
+        origin_note = ORIGIN_LABEL.get(entry.origin, entry.origin) + (f" · {entry.model}" if entry.model else "")
+        self.form.configure(text=f"Edit entry {entry.id}  --  {origin_note}")
         self.year_entry.delete(0, "end")
         self.year_entry.insert(0, year)
         self.lr_field.set(entry.left_right)
@@ -243,6 +267,28 @@ class DataView(ttk.Frame):
                              (self.sources, "\n".join(entry.sources))):
             widget.delete("1.0", "end")
             widget.insert("1.0", text)
+        self._show_categories(entry)
+
+    def _show_categories(self, entry=None) -> None:
+        if entry is None or not entry.categories:
+            self.category_frame.pack_forget()
+            return
+        lines = []
+        for c in CATEGORIES:
+            if c.id not in entry.categories:
+                continue
+            rating = entry.categories[c.id]
+            tag = f" (conf. {rating.confidence:.1f})" if rating.confidence < 1.0 else ""
+            lines.append(f"{c.label}: {rating.score:+d}{tag}")
+        text = "   •   ".join(lines)
+        if entry.sources_verified:
+            n_ok = sum(1 for ok in entry.sources_verified.values() if ok)
+            text += f"\nSources: {n_ok}/{len(entry.sources_verified)} reachable"
+        if entry.review_notes:
+            reviewer = f" by {entry.reviewed_by}" if entry.reviewed_by else ""
+            text += f"\nRed-team review{reviewer}: {entry.review_notes}"
+        self.category_label.configure(text=text)
+        self.category_frame.pack(fill="x", pady=(0, 8), after=self.form)
 
     def _new_entry(self, year: str | None = None) -> None:
         """Empty the form so that Save creates a NEW entry (keeps the year, so several entries per year are quick)."""
@@ -259,6 +305,7 @@ class DataView(ttk.Frame):
         self.summary_entry.delete(0, "end")
         for widget in (self.just_lr, self.just_la, self.sources):
             widget.delete("1.0", "end")
+        self._show_categories(None)
 
     def _read_form(self) -> dict:
         return dict(
@@ -322,13 +369,25 @@ class DataView(ttk.Frame):
             return self._error("Invalid year", "Enter a four-digit year (e.g. 2024) in the form first.")
 
         self._busy = True
-        self.status.configure(text=f"Asking the model about {self._country.name} {year} ... this can take a few minutes.")
+        backend_note = "local Ollama" if agent.BACKEND == "ollama" else f"hosted API ({agent.MODEL or 'no model set'})"
+        self.status.configure(text=f"Asking the model ({backend_note}) about {self._country.name} {year} ... this can take a while.")
         results: queue.Queue = queue.Queue()
         country = self._country
+        do_verify, do_review = self.verify_sources_var.get(), self.review_var.get()
 
         def work() -> None:                          # runs in a thread: NO tk calls in here
             try:
-                results.put(("ok", agent.evaluate_country(country.name, year)))
+                rated = agent.evaluate_country(country.name, year)
+                extra = {}
+                if do_verify:
+                    from agent.verify import verify_sources
+                    from agent.evaluate import all_sources
+                    extra["sources_verified"] = verify_sources(all_sources(rated))
+                if do_review:
+                    from agent.review import review, apply_review, REVIEW_MODEL
+                    rated, notes = apply_review(rated, review(country.name, year, rated))
+                    extra["review_notes"], extra["reviewed_by"] = notes, REVIEW_MODEL
+                results.put(("ok", (rated, extra)))
             except agent.AgentError as e:
                 results.put(("error", str(e)))
             except Exception as e:
@@ -350,8 +409,9 @@ class DataView(ttk.Frame):
         if kind == "error":
             self.status.configure(text="The agent request failed.")
             return self._error("Agent failed", payload)
+        rated, extra = payload
         try:
-            entry = agent.store_result(country.index, year, payload)   # stored here, in the main thread
+            entry = agent.store_result(country.index, year, rated, **extra)   # stored here, in the main thread
         except ValueError as e:
             return self._error("Could not save", str(e))
         self.status.configure(text=f"Agent entry {entry.id} added.")
@@ -366,5 +426,5 @@ class DataView(ttk.Frame):
 class DataWindow(ToolWindow):
     def __init__(self, parent, on_data_changed):
         super().__init__(parent, "Data", size=LAYOUT.data_window_size)
-        self.minsize(style.px(820), style.px(600))
+        self.minsize(style.px(1080), style.px(620))   # keeps the tree's Model column from being squeezed out
         DataView(self.content, on_data_changed).pack(fill="both", expand=True)

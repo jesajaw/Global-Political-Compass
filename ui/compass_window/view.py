@@ -17,6 +17,7 @@ import math
 import tkinter as tk
 
 from data import scoring, store
+from data.categories import CATEGORIES, CONTEXT_ONLY_CATEGORIES
 from .. import style
 from ..style import LAYOUT
 
@@ -198,6 +199,28 @@ class CompassCanvas(tk.Canvas):
             lines.append((latest.summary or "No summary available.", style.FONT_NORMAL, style.COLOR_FG))
             detail = " \u2022 ".join(filter(None, (latest.justification_lr, latest.justification_la)))
             lines.append((detail or "No details available.", style.FONT_NORMAL, style.COLOR_STATUS_TEXT))
+            origin_text = style.ORIGIN_LABEL.get(latest.origin, latest.origin)
+            if latest.model:
+                origin_text += f" ({latest.model})"
+            lines.append((f"Latest entry: {origin_text}", style.FONT_NORMAL, style.COLOR_HINT))
+            if latest.sources_verified:
+                n_ok = sum(1 for ok in latest.sources_verified.values() if ok)
+                lines.append((f"Sources checked: {n_ok}/{len(latest.sources_verified)} reachable",
+                              style.FONT_NORMAL, style.COLOR_HINT))
+            if latest.review_notes:
+                reviewer = f" by {latest.reviewed_by}" if latest.reviewed_by else ""
+                lines.append((f"Red-team review{reviewer}: {latest.review_notes}", style.FONT_NORMAL, style.COLOR_HINT))
+
+        # category breakdown, context-only categories included -- this is the "readable but not
+        # plotted" scales: it never influences the two axes above, see data.categories/scoring.
+        breakdown = scoring.get_category_breakdown(country.index, self.year)
+        if breakdown:
+            lines.append(("Category breakdown (-10..+10):", style.FONT_BOLD, style.COLOR_FG))
+            for category in CATEGORIES:
+                if category.id in breakdown:
+                    tag = " (context only)" if category in CONTEXT_ONLY_CATEGORIES else ""
+                    lines.append((f"  {category.label}: {fmt(breakdown[category.id])}{tag}",
+                                  style.FONT_NORMAL, style.COLOR_STATUS_TEXT))
 
         pad, width = LAYOUT.tooltip_padding, LAYOUT.tooltip_width
         items, y = [], 0
